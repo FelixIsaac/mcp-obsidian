@@ -157,3 +157,68 @@ You can also watch the server logs with this command:
 ```bash
 tail -n 20 -f ~/Library/Logs/Claude/mcp-server-mcp-obsidian.log
 ```
+
+---
+
+## Fork additions — privacy layer
+
+This fork (`FelixIsaac/mcp-obsidian`) adds a content privacy layer on top of the upstream server. Two additions to `tools.py`:
+
+### 1. `%%private%%` block stripping
+
+Obsidian's `%%...%%` comment syntax marks content as hidden — it is excluded from Reading View, PDF exports, and Obsidian Publish. This fork extends that contract to MCP context.
+
+`strip_private_blocks()` strips blocks that begin with `%%private` before file content reaches the model. This is intentionally narrower than stripping all `%%...%%` comments (upstream PR [#148](https://github.com/MarkusPfundstein/mcp-obsidian/pull/148) proposes stripping all of them): local/on-device models are permitted to see non-private `%%` annotations; only blocks explicitly marked `%%private` are withheld from frontier AI.
+
+Example note:
+
+```markdown
+My meeting notes from today.
+
+%%private
+I'm not comfortable sharing this part with an AI assistant.
+%%
+```
+
+The `%%private ... %%` block never reaches the model.
+
+### 2. Frontmatter-gated redaction
+
+`redact_if_classified()` checks a file's YAML frontmatter before returning any content. If the file is marked as classified, it returns a redaction notice instead of the content — no body text is forwarded.
+
+**Trigger conditions (either field):**
+
+| Frontmatter field | Value | Effect |
+|---|---|---|
+| `ai_scope` | `none` | File fully redacted |
+| `sensitive` | `HIGH` | File fully redacted |
+
+**Example frontmatter:**
+
+```yaml
+---
+ai_scope: none
+sensitive: HIGH
+---
+```
+
+**Redaction notice returned to model:**
+
+```
+[REDACTED: 2026-04-19.md is classified (ai_scope: none / sensitive: HIGH). Content not available to AI.]
+```
+
+Both `get_file_contents` and `batch_get_file_contents` run through this gate.
+
+### Privacy contract summary
+
+```
+Vault file
+  → redact_if_classified()    # Tier 3 gate — returns notice if classified
+    → strip_private_blocks()  # strips %%private...%% blocks
+      → model context
+```
+
+### Upstream relationship
+
+The `%%private%%` stripping and frontmatter-gate are **not** part of upstream `MarkusPfundstein/mcp-obsidian`. They are maintained in this fork. If upstream PR #148 merges (strip all `%%...%%`), this fork will rebase and narrow its own stripping accordingly.
