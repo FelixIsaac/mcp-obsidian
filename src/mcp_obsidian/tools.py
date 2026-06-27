@@ -7,7 +7,33 @@ from mcp.types import (
 )
 import json
 import os
+import re
 from . import obsidian
+
+
+def strip_private_blocks(text: str) -> str:
+    """Strip %%private...%% blocks so content never reaches the model."""
+    return re.sub(r'%%private\b.*?%%', '', text, flags=re.DOTALL)
+
+
+_FRONTMATTER_RE = re.compile(r'\A---\n(.*?)\n---\n', re.DOTALL)
+_AI_SCOPE_NONE  = re.compile(r'^ai_scope:\s*none\s*$', re.MULTILINE | re.IGNORECASE)
+_SENSITIVE_HIGH = re.compile(r'^sensitive:\s*HIGH', re.MULTILINE)
+
+
+def redact_if_classified(text: str, filepath: str = "") -> str:
+    """
+    If frontmatter marks this file as Tier 3 (ai_scope: none or sensitive: HIGH/CLASSIFIED),
+    return a redaction notice instead of the content.
+    Otherwise strip %%private%% blocks and return safe content.
+    """
+    m = _FRONTMATTER_RE.match(text)
+    if m:
+        fm_yaml = m.group(1)
+        if _AI_SCOPE_NONE.search(fm_yaml) or _SENSITIVE_HIGH.search(fm_yaml):
+            name = filepath.split("/")[-1] if filepath else "this file"
+            return f"[REDACTED: {name} is classified (ai_scope: none / sensitive: HIGH). Content not available to AI.]"
+    return strip_private_blocks(text)
 
 api_key = os.getenv("OBSIDIAN_API_KEY", "")
 obsidian_host = os.getenv("OBSIDIAN_HOST", "127.0.0.1")
@@ -123,7 +149,7 @@ class GetFileContentsToolHandler(ToolHandler):
         return [
             TextContent(
                 type="text",
-                text=json.dumps(content, indent=2)
+                text=redact_if_classified(content, args["filepath"])
             )
         ]
     
@@ -464,7 +490,17 @@ class BatchGetFileContentsToolHandler(ToolHandler):
             raise RuntimeError("filepaths argument missing in arguments")
 
         api = obsidian.Obsidian(api_key=api_key, host=obsidian_host)
-        content = api.get_batch_file_contents(args["filepaths"])
+
+        # Redact classified files individually before concatenation
+        parts = []
+        for fp in args["filepaths"]:
+            try:
+                raw = api.get_file_contents(fp)
+                safe = redact_if_classified(raw, fp)
+            except Exception as e:
+                safe = f"Error reading file: {e}"
+            parts.append(f"# {fp}\n\n{safe}\n\n---\n\n")
+        content = "".join(parts)
 
         return [
             TextContent(
