@@ -55,6 +55,23 @@ add_tool_handler(tools.PeriodicNotesToolHandler())
 add_tool_handler(tools.RecentPeriodicNotesToolHandler())
 add_tool_handler(tools.RecentChangesToolHandler())
 
+# Ported from obsidian-extra (2026-07-20 consolidation) — closes the gaps the default
+# HTTP obsidian server + obsidian-extra used to split across two servers.
+add_tool_handler(tools.ActiveFileReadToolHandler())
+add_tool_handler(tools.ActiveFileWriteToolHandler())
+add_tool_handler(tools.ActiveFileAppendToolHandler())
+add_tool_handler(tools.ActiveFilePatchToolHandler())
+add_tool_handler(tools.ActiveFileDeleteToolHandler())
+add_tool_handler(tools.PeriodicNoteWriteToolHandler())
+add_tool_handler(tools.PeriodicNoteAppendToolHandler())
+add_tool_handler(tools.PeriodicNoteDeleteToolHandler())
+add_tool_handler(tools.ListCommandsToolHandler())
+add_tool_handler(tools.ExecuteCommandToolHandler())
+add_tool_handler(tools.ListTagsToolHandler())
+add_tool_handler(tools.MoveFileToolHandler())
+add_tool_handler(tools.GetFileContentsRichToolHandler())
+add_tool_handler(tools.OpenFileToolHandler())
+
 @app.list_tools()
 async def list_tools() -> list[Tool]:
     """List available tools."""

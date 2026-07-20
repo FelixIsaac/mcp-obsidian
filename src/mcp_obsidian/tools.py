@@ -11,9 +11,40 @@ import re
 from . import obsidian
 
 
+_PRIVATE_BLOCK_RE = re.compile(
+    r'^%%private[ \t]*\r?\n(.*?)\r?\n%%[ \t]*\r?$',
+    re.MULTILINE | re.DOTALL
+)
+_UNCLOSED_PRIVATE_RE = re.compile(
+    r'^%%private[ \t]*\r?\n.*\Z',
+    re.MULTILINE | re.DOTALL
+)
+
+
 def strip_private_blocks(text: str) -> str:
-    """Strip %%private...%% blocks so content never reaches the model."""
-    return re.sub(r'%%private\b.*?%%', '', text, flags=re.DOTALL)
+    """
+    Strip well-formed %%private ... %% blocks — opening and closing markers
+    each alone on their own line — so the content between them never reaches
+    the model.
+
+    Deliberately does NOT match inline/prose mentions of the literal string
+    "%%private%%" (e.g. documentation explaining the syntax, or a code span
+    like `%%private%%`) — a real block always has a line break between the
+    opening marker and its content; an inline mention doesn't. The original
+    regex (`%%private\\b.*?%%`) didn't require that line break, so it matched
+    "%%private%%" written inline as prose and silently ate it — found live
+    against this vault's own MCP-scaffolding doc, which explains the syntax
+    in a sentence.
+
+    Fail-safe for malformed input: if an opening "%%private" marker is found
+    alone on its own line with no matching closing "%%" marker afterward,
+    everything from that marker to the end of the file is stripped rather
+    than left exposed — an unclosed block is treated as still-private rather
+    than risking a leak from a typo'd closing marker.
+    """
+    text = _PRIVATE_BLOCK_RE.sub('', text)
+    text = _UNCLOSED_PRIVATE_RE.sub('', text)
+    return text
 
 
 _FRONTMATTER_RE = re.compile(r'\A---\n(.*?)\n---\n', re.DOTALL)
@@ -34,6 +65,44 @@ def redact_if_classified(text: str, filepath: str = "") -> str:
             name = filepath.split("/")[-1] if filepath else "this file"
             return f"[REDACTED: {name} is classified (ai_scope: none / sensitive: HIGH). Content not available to AI.]"
     return strip_private_blocks(text)
+
+
+def is_classified(text: str) -> bool:
+    """Frontmatter-only classification check, for filtering search results without a redaction-notice string."""
+    m = _FRONTMATTER_RE.match(text)
+    if not m:
+        return False
+    fm_yaml = m.group(1)
+    return bool(_AI_SCOPE_NONE.search(fm_yaml) or _SENSITIVE_HIGH.search(fm_yaml))
+
+
+def redact_search_results(results: list, api: "obsidian.Obsidian", filename_key: str = "filename") -> list:
+    """
+    Applied to search results (simple search, complex/JsonLogic search): drops results whose
+    source file is classified (checked via a per-result frontmatter fetch — real cost, real
+    correctness tradeoff, documented in the README), and strips %%private%% blocks from any
+    context/content snippets on the results that remain.
+    """
+    safe_results = []
+    for r in results:
+        fp = r.get(filename_key) if isinstance(r, dict) else None
+        if fp:
+            try:
+                raw = api.get_file_contents(fp)
+                if is_classified(raw):
+                    continue  # drop entirely — don't even leak the filename-plus-snippet
+            except Exception:
+                pass  # if we can't verify, fall through and still scrub what we can below
+        if isinstance(r, dict):
+            r = dict(r)
+            if "matches" in r and isinstance(r["matches"], list):
+                r["matches"] = [
+                    {**m, "context": strip_private_blocks(m.get("context", ""))}
+                    if isinstance(m, dict) else m
+                    for m in r["matches"]
+                ]
+        safe_results.append(r)
+    return safe_results
 
 api_key = os.getenv("OBSIDIAN_API_KEY", "")
 obsidian_host = os.getenv("OBSIDIAN_HOST", "127.0.0.1")
@@ -186,8 +255,8 @@ class SearchToolHandler(ToolHandler):
         context_length = args.get("context_length", 100)
         
         api = obsidian.Obsidian(api_key=api_key, host=obsidian_host)
-        results = api.search(args["query"], context_length)
-        
+        results = redact_search_results(api.search(args["query"], context_length), api)
+
         formatted_results = []
         for result in results:
             formatted_matches = []
@@ -451,7 +520,9 @@ class ComplexSearchToolHandler(ToolHandler):
            raise RuntimeError("query argument missing in arguments")
 
        api = obsidian.Obsidian(api_key=api_key, host=obsidian_host)
-       results = api.search_json(args.get("query", ""))
+       raw_results = api.search_json(args.get("query", ""))
+       # JsonLogic search responses vary by matched-file shape; only known to carry a "filename" key
+       results = redact_search_results(raw_results, api) if isinstance(raw_results, list) else raw_results
 
        return [
            TextContent(
@@ -556,7 +627,7 @@ class PeriodicNotesToolHandler(ToolHandler):
         return [
             TextContent(
                 type="text",
-                text=content
+                text=redact_if_classified(content) if type == "content" else content
             )
         ]
         
@@ -613,6 +684,11 @@ class RecentPeriodicNotesToolHandler(ToolHandler):
         api = obsidian.Obsidian(api_key=api_key, host=obsidian_host)
         results = api.get_recent_periodic_notes(period, limit, include_content)
 
+        if include_content and isinstance(results, list):
+            for r in results:
+                if isinstance(r, dict) and "content" in r:
+                    r["content"] = redact_if_classified(r["content"], r.get("path", ""))
+
         return [
             TextContent(
                 type="text",
@@ -666,3 +742,346 @@ class RecentChangesToolHandler(ToolHandler):
                 text=json.dumps(results, indent=2)
             )
         ]
+
+
+# --- Active file (ported from obsidian-extra) ---
+
+class ActiveFileReadToolHandler(ToolHandler):
+    def __init__(self):
+        super().__init__("obsidian_active_file_read")
+
+    def get_tool_description(self):
+        return Tool(
+            name=self.name,
+            description="Read the full content of the file currently open/active in Obsidian.",
+            inputSchema={"type": "object", "properties": {}, "required": []}
+        )
+
+    def run_tool(self, args: dict) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
+        api = obsidian.Obsidian(api_key=api_key, host=obsidian_host)
+        content = api.get_active_file()
+        return [TextContent(type="text", text=redact_if_classified(content))]
+
+
+class ActiveFileWriteToolHandler(ToolHandler):
+    def __init__(self):
+        super().__init__("obsidian_active_file_write")
+
+    def get_tool_description(self):
+        return Tool(
+            name=self.name,
+            description="Overwrite the entire content of the currently active file.",
+            inputSchema={
+                "type": "object",
+                "properties": {"content": {"type": "string", "description": "New full file content."}},
+                "required": ["content"]
+            }
+        )
+
+    def run_tool(self, args: dict) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
+        if "content" not in args:
+            raise RuntimeError("content argument missing in arguments")
+        api = obsidian.Obsidian(api_key=api_key, host=obsidian_host)
+        api.update_active_file(args["content"])
+        return [TextContent(type="text", text="Successfully overwrote active file")]
+
+
+class ActiveFileAppendToolHandler(ToolHandler):
+    def __init__(self):
+        super().__init__("obsidian_active_file_append")
+
+    def get_tool_description(self):
+        return Tool(
+            name=self.name,
+            description="Append content to the end of the currently active file.",
+            inputSchema={
+                "type": "object",
+                "properties": {"content": {"type": "string", "description": "Text to append."}},
+                "required": ["content"]
+            }
+        )
+
+    def run_tool(self, args: dict) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
+        if "content" not in args:
+            raise RuntimeError("content argument missing in arguments")
+        api = obsidian.Obsidian(api_key=api_key, host=obsidian_host)
+        api.append_active_file(args["content"])
+        return [TextContent(type="text", text="Successfully appended to active file")]
+
+
+class ActiveFilePatchToolHandler(ToolHandler):
+    def __init__(self):
+        super().__init__("obsidian_active_file_patch")
+
+    def get_tool_description(self):
+        return Tool(
+            name=self.name,
+            description="Insert content relative to a heading, block reference, or frontmatter field in the active file.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "operation": {"type": "string", "enum": ["append", "prepend", "replace"]},
+                    "target_type": {"type": "string", "enum": ["heading", "block", "frontmatter"]},
+                    "target": {"type": "string", "description": "Heading path, block reference, or frontmatter field."},
+                    "content": {"type": "string"}
+                },
+                "required": ["operation", "target_type", "target", "content"]
+            }
+        )
+
+    def run_tool(self, args: dict) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
+        if not all(k in args for k in ["operation", "target_type", "target", "content"]):
+            raise RuntimeError("operation, target_type, target and content arguments required")
+        api = obsidian.Obsidian(api_key=api_key, host=obsidian_host)
+        api.patch_active_file(args["operation"], args["target_type"], args["target"], args["content"])
+        return [TextContent(type="text", text="Successfully patched active file")]
+
+
+class ActiveFileDeleteToolHandler(ToolHandler):
+    def __init__(self):
+        super().__init__("obsidian_active_file_delete")
+
+    def get_tool_description(self):
+        return Tool(
+            name=self.name,
+            description="Delete the currently active file.",
+            inputSchema={
+                "type": "object",
+                "properties": {"confirm": {"type": "boolean", "default": False}},
+                "required": ["confirm"]
+            }
+        )
+
+    def run_tool(self, args: dict) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
+        if not args.get("confirm", False):
+            raise RuntimeError("confirm must be set to true to delete the active file")
+        api = obsidian.Obsidian(api_key=api_key, host=obsidian_host)
+        api.delete_active_file()
+        return [TextContent(type="text", text="Successfully deleted active file")]
+
+
+# --- Periodic note writes (ported from obsidian-extra; get_periodic_note above covers reads) ---
+
+class PeriodicNoteWriteToolHandler(ToolHandler):
+    def __init__(self):
+        super().__init__("obsidian_periodic_note_write")
+
+    def get_tool_description(self):
+        return Tool(
+            name=self.name,
+            description="Overwrite the content of the current periodic note for the specified period.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "period": {"type": "string", "enum": ["daily", "weekly", "monthly", "quarterly", "yearly"]},
+                    "content": {"type": "string"}
+                },
+                "required": ["period", "content"]
+            }
+        )
+
+    def run_tool(self, args: dict) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
+        if "period" not in args or "content" not in args:
+            raise RuntimeError("period and content arguments required")
+        api = obsidian.Obsidian(api_key=api_key, host=obsidian_host)
+        api.update_periodic_note(args["period"], args["content"])
+        return [TextContent(type="text", text=f"Successfully wrote {args['period']} periodic note")]
+
+
+class PeriodicNoteAppendToolHandler(ToolHandler):
+    def __init__(self):
+        super().__init__("obsidian_periodic_note_append")
+
+    def get_tool_description(self):
+        return Tool(
+            name=self.name,
+            description="Append content to the current periodic note for the specified period.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "period": {"type": "string", "enum": ["daily", "weekly", "monthly", "quarterly", "yearly"]},
+                    "content": {"type": "string"}
+                },
+                "required": ["period", "content"]
+            }
+        )
+
+    def run_tool(self, args: dict) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
+        if "period" not in args or "content" not in args:
+            raise RuntimeError("period and content arguments required")
+        api = obsidian.Obsidian(api_key=api_key, host=obsidian_host)
+        api.append_periodic_note(args["period"], args["content"])
+        return [TextContent(type="text", text=f"Successfully appended to {args['period']} periodic note")]
+
+
+class PeriodicNoteDeleteToolHandler(ToolHandler):
+    def __init__(self):
+        super().__init__("obsidian_periodic_note_delete")
+
+    def get_tool_description(self):
+        return Tool(
+            name=self.name,
+            description="Delete the current periodic note for the specified period.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "period": {"type": "string", "enum": ["daily", "weekly", "monthly", "quarterly", "yearly"]},
+                    "confirm": {"type": "boolean", "default": False}
+                },
+                "required": ["period", "confirm"]
+            }
+        )
+
+    def run_tool(self, args: dict) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
+        if "period" not in args:
+            raise RuntimeError("period argument missing in arguments")
+        if not args.get("confirm", False):
+            raise RuntimeError("confirm must be set to true to delete a periodic note")
+        api = obsidian.Obsidian(api_key=api_key, host=obsidian_host)
+        api.delete_periodic_note(args["period"])
+        return [TextContent(type="text", text=f"Successfully deleted {args['period']} periodic note")]
+
+
+# --- Commands ---
+
+class ListCommandsToolHandler(ToolHandler):
+    def __init__(self):
+        super().__init__("obsidian_list_commands")
+
+    def get_tool_description(self):
+        return Tool(
+            name=self.name,
+            description="List all commands registered in Obsidian's command palette (including community-plugin commands).",
+            inputSchema={"type": "object", "properties": {}, "required": []}
+        )
+
+    def run_tool(self, args: dict) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
+        api = obsidian.Obsidian(api_key=api_key, host=obsidian_host)
+        return [TextContent(type="text", text=json.dumps(api.list_commands(), indent=2))]
+
+
+class ExecuteCommandToolHandler(ToolHandler):
+    def __init__(self):
+        super().__init__("obsidian_execute_command")
+
+    def get_tool_description(self):
+        return Tool(
+            name=self.name,
+            description="Execute an Obsidian command by id, as if triggered from the command palette. Triggers the UI action; does not return data from it.",
+            inputSchema={
+                "type": "object",
+                "properties": {"command_id": {"type": "string", "description": "Command id, from obsidian_list_commands."}},
+                "required": ["command_id"]
+            }
+        )
+
+    def run_tool(self, args: dict) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
+        if "command_id" not in args:
+            raise RuntimeError("command_id argument missing in arguments")
+        api = obsidian.Obsidian(api_key=api_key, host=obsidian_host)
+        api.execute_command(args["command_id"])
+        return [TextContent(type="text", text=f"Successfully executed command {args['command_id']}")]
+
+
+# --- Tags ---
+
+class ListTagsToolHandler(ToolHandler):
+    def __init__(self):
+        super().__init__("obsidian_list_tags")
+
+    def get_tool_description(self):
+        return Tool(
+            name=self.name,
+            description="List all tags used across the vault, with usage counts.",
+            inputSchema={"type": "object", "properties": {}, "required": []}
+        )
+
+    def run_tool(self, args: dict) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
+        api = obsidian.Obsidian(api_key=api_key, host=obsidian_host)
+        return [TextContent(type="text", text=json.dumps(api.list_tags(), indent=2))]
+
+
+# --- Move / rename ---
+
+class MoveFileToolHandler(ToolHandler):
+    def __init__(self):
+        super().__init__("obsidian_move_file")
+
+    def get_tool_description(self):
+        return Tool(
+            name=self.name,
+            description="Move or rename a file within the vault.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "filepath": {"type": "string", "description": "Current vault-relative path.", "format": "path"},
+                    "destination": {"type": "string", "description": "New vault-relative path."}
+                },
+                "required": ["filepath", "destination"]
+            }
+        )
+
+    def run_tool(self, args: dict) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
+        if "filepath" not in args or "destination" not in args:
+            raise RuntimeError("filepath and destination arguments required")
+        api = obsidian.Obsidian(api_key=api_key, host=obsidian_host)
+        api.move_file(args["filepath"], args["destination"])
+        return [TextContent(type="text", text=f"Successfully moved {args['filepath']} to {args['destination']}")]
+
+
+# --- Rich metadata reads ---
+
+class GetFileContentsRichToolHandler(ToolHandler):
+    def __init__(self):
+        super().__init__("obsidian_get_file_contents_rich")
+
+    def get_tool_description(self):
+        return Tool(
+            name=self.name,
+            description="Read a vault file with rich metadata. format='note' returns parsed note JSON (frontmatter, tags, stat, content); format='document-map' returns the patch-target map (headings/blocks) useful before patching.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "filepath": {"type": "string", "format": "path"},
+                    "format": {"type": "string", "enum": ["note", "document-map"], "default": "note"}
+                },
+                "required": ["filepath"]
+            }
+        )
+
+    def run_tool(self, args: dict) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
+        if "filepath" not in args:
+            raise RuntimeError("filepath argument missing in arguments")
+        api = obsidian.Obsidian(api_key=api_key, host=obsidian_host)
+        fmt = args.get("format", "note")
+        result = api.get_file_contents_rich(args["filepath"], fmt)
+        # Rich reads return parsed JSON with a top-level "content" field on format="note" —
+        # redact that field in place rather than the whole JSON blob.
+        if isinstance(result, dict) and "content" in result:
+            result["content"] = redact_if_classified(result["content"], args["filepath"])
+        return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+
+# --- Open in Obsidian UI ---
+
+class OpenFileToolHandler(ToolHandler):
+    def __init__(self):
+        super().__init__("obsidian_open_file")
+
+    def get_tool_description(self):
+        return Tool(
+            name=self.name,
+            description="Tell Obsidian to open a specific note in its UI.",
+            inputSchema={
+                "type": "object",
+                "properties": {"filepath": {"type": "string", "format": "path"}},
+                "required": ["filepath"]
+            }
+        )
+
+    def run_tool(self, args: dict) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
+        if "filepath" not in args:
+            raise RuntimeError("filepath argument missing in arguments")
+        api = obsidian.Obsidian(api_key=api_key, host=obsidian_host)
+        api.open_file(args["filepath"])
+        return [TextContent(type="text", text=f"Successfully opened {args['filepath']}")]

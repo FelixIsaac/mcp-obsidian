@@ -289,3 +289,200 @@ class Obsidian():
             return response.json()
 
         return self._safe_call(call_fn)
+
+    # --- Active file ---
+
+    def get_active_file(self) -> str:
+        url = f"{self.get_base_url()}/active/"
+
+        def call_fn():
+            response = requests.get(url, headers=self._get_headers(), verify=self.verify_ssl, timeout=self.timeout)
+            response.raise_for_status()
+            return response.text
+
+        return self._safe_call(call_fn)
+
+    def update_active_file(self, content: str) -> Any:
+        url = f"{self.get_base_url()}/active/"
+
+        def call_fn():
+            response = requests.put(
+                url,
+                headers=self._get_headers() | {'Content-Type': 'text/markdown'},
+                data=content,
+                verify=self.verify_ssl,
+                timeout=self.timeout
+            )
+            response.raise_for_status()
+            return None
+
+        return self._safe_call(call_fn)
+
+    def append_active_file(self, content: str) -> Any:
+        url = f"{self.get_base_url()}/active/"
+
+        def call_fn():
+            response = requests.post(
+                url,
+                headers=self._get_headers() | {'Content-Type': 'text/markdown'},
+                data=content,
+                verify=self.verify_ssl,
+                timeout=self.timeout
+            )
+            response.raise_for_status()
+            return None
+
+        return self._safe_call(call_fn)
+
+    def patch_active_file(self, operation: str, target_type: str, target: str, content: str) -> Any:
+        url = f"{self.get_base_url()}/active/"
+
+        headers = self._get_headers() | {
+            'Content-Type': 'text/markdown',
+            'Operation': operation,
+            'Target-Type': target_type,
+            'Target': urllib.parse.quote(target)
+        }
+
+        def call_fn():
+            response = requests.patch(url, headers=headers, data=content, verify=self.verify_ssl, timeout=self.timeout)
+            response.raise_for_status()
+            return None
+
+        return self._safe_call(call_fn)
+
+    def delete_active_file(self) -> Any:
+        url = f"{self.get_base_url()}/active/"
+
+        def call_fn():
+            response = requests.delete(url, headers=self._get_headers(), verify=self.verify_ssl, timeout=self.timeout)
+            response.raise_for_status()
+            return None
+
+        return self._safe_call(call_fn)
+
+    # --- Periodic note writes (get_periodic_note above already covers reads) ---
+
+    def update_periodic_note(self, period: str, content: str) -> Any:
+        url = f"{self.get_base_url()}/periodic/{period}/"
+
+        def call_fn():
+            response = requests.put(
+                url,
+                headers=self._get_headers() | {'Content-Type': 'text/markdown'},
+                data=content,
+                verify=self.verify_ssl,
+                timeout=self.timeout
+            )
+            response.raise_for_status()
+            return None
+
+        return self._safe_call(call_fn)
+
+    def append_periodic_note(self, period: str, content: str) -> Any:
+        url = f"{self.get_base_url()}/periodic/{period}/"
+
+        def call_fn():
+            response = requests.post(
+                url,
+                headers=self._get_headers() | {'Content-Type': 'text/markdown'},
+                data=content,
+                verify=self.verify_ssl,
+                timeout=self.timeout
+            )
+            response.raise_for_status()
+            return None
+
+        return self._safe_call(call_fn)
+
+    def delete_periodic_note(self, period: str) -> Any:
+        url = f"{self.get_base_url()}/periodic/{period}/"
+
+        def call_fn():
+            response = requests.delete(url, headers=self._get_headers(), verify=self.verify_ssl, timeout=self.timeout)
+            response.raise_for_status()
+            return None
+
+        return self._safe_call(call_fn)
+
+    # --- Commands ---
+
+    def list_commands(self) -> Any:
+        url = f"{self.get_base_url()}/commands/"
+
+        def call_fn():
+            response = requests.get(url, headers=self._get_headers(), verify=self.verify_ssl, timeout=self.timeout)
+            response.raise_for_status()
+            return response.json()['commands']
+
+        return self._safe_call(call_fn)
+
+    def execute_command(self, command_id: str) -> Any:
+        url = f"{self.get_base_url()}/commands/{urllib.parse.quote(command_id)}/"
+
+        def call_fn():
+            response = requests.post(url, headers=self._get_headers(), verify=self.verify_ssl, timeout=self.timeout)
+            response.raise_for_status()
+            return None
+
+        return self._safe_call(call_fn)
+
+    # --- Tags ---
+
+    def list_tags(self) -> Any:
+        url = f"{self.get_base_url()}/tags/"
+
+        def call_fn():
+            response = requests.get(url, headers=self._get_headers(), verify=self.verify_ssl, timeout=self.timeout)
+            response.raise_for_status()
+            return response.json()
+
+        return self._safe_call(call_fn)
+
+    # --- Move / rename ---
+
+    def move_file(self, filepath: str, destination: str) -> Any:
+        url = f"{self.get_base_url()}/vault/{filepath}"
+
+        def call_fn():
+            response = requests.request(
+                'MOVE',
+                url,
+                headers=self._get_headers() | {'Destination': destination},
+                verify=self.verify_ssl,
+                timeout=self.timeout
+            )
+            response.raise_for_status()
+            return None
+
+        return self._safe_call(call_fn)
+
+    # --- Rich metadata reads ---
+
+    def get_file_contents_rich(self, filepath: str, format: str = "note") -> Any:
+        url = f"{self.get_base_url()}/vault/{filepath}"
+        accept = 'application/vnd.olrapi.document-map+json' if format == "document-map" else 'application/vnd.olrapi.note+json'
+
+        def call_fn():
+            response = requests.get(
+                url,
+                headers=self._get_headers() | {'Accept': accept},
+                verify=self.verify_ssl,
+                timeout=self.timeout
+            )
+            response.raise_for_status()
+            return response.json()
+
+        return self._safe_call(call_fn)
+
+    # --- Open in Obsidian UI ---
+
+    def open_file(self, filepath: str) -> Any:
+        url = f"{self.get_base_url()}/open/{filepath}"
+
+        def call_fn():
+            response = requests.post(url, headers=self._get_headers(), verify=self.verify_ssl, timeout=self.timeout)
+            response.raise_for_status()
+            return None
+
+        return self._safe_call(call_fn)
