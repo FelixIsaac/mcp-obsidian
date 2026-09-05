@@ -28,6 +28,8 @@ def test_journal_denied_without_consent(tmp_path):
     _set_consent(tmp_path, ["# nothing relevant", "20_Journal/other.md"])
     d = t.ep2_read_denial("20_Journal/2026-05-10.md")
     assert d and "EP-2" in d and "20_Journal/2026-05-10.md" in d
+    assert "Ask Felix" in d
+    assert "Do NOT write 00_System/.read-consent yourself" in d
 
 
 def test_journal_allowed_with_consent(tmp_path):

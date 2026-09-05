@@ -164,13 +164,11 @@ def ep2_read_denial(filepath: str, content: str = ""):
     # matching the Read hook (consent is per-path, and a copy is a different path).
     if rel in entries or rel.lower().lstrip("/") in {e.lower().lstrip("/") for e in entries}:
         return None
-    return (f"[DENIED: EP-2 read-guard \u2014 '{rel}' is {kind}. Reading requires Felix's "
-            "explicit per-window consent on EVERY channel (C6 ratified 2026-08-03; "
-            "extended to the MCP channel 2026-09-04, backlog 135). If Felix has given "
-            "his go-ahead for this file, add its vault-relative path to "
-            "00_System/.read-consent (one per line) and retry. Consent is per-window "
-            "(wiped weekly) and never reaches Tier-3 or %%private content. Do not "
-            "bypass via raw file reads.]")
+    return (f"[DENIED: EP-2 read-guard \u2014 '{rel}' is {kind}. Ask Felix in this chat "
+            "to approve this exact path. Do NOT write 00_System/.read-consent yourself "
+            "(relayed consent — EP-2). Felix grants via a user-run command or a native "
+            "harness approval (OpenClaw 👍), not via the model. Per-window; never T3/"
+            "%%private. Do not bypass via raw file reads.]")
 
 
 def redact_if_classified(text: str, filepath: str = "") -> str:
